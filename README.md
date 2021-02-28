@@ -205,16 +205,16 @@ saved_model_cli show --dir <path_to_saved_model_folder> --tag_set serve --signat
 and you should get an output like below:
 ```
 The given SavedModel SignatureDef contains the following input(s):
-  inputs['input_1'] tensor_info:
-      dtype: DT_INT64
-      shape: (-1, 1)
-      name: serving_default_input_1:0
-The given SavedModel SignatureDef contains the following output(s):
-  outputs['output_1'] tensor_info:
-      dtype: DT_FLOAT
-      shape: (-1, 1)
-      name: StatefulPartitionedCall:0
-Method name is: tensorflow/serving/predict
+      inputs['input_1'] tensor_info:
+          dtype: DT_FLOAT
+          shape: (-1, 28, 28, 1)
+          name: serving_default_input_1:0
+    The given SavedModel SignatureDef contains the following output(s):
+      outputs['dense_2'] tensor_info:
+          dtype: DT_FLOAT
+          shape: (-1, 10)
+          name: StatefulPartitionedCall:0
+    Method name is: tensorflow/serving/predict
 ```
 here we would need the name `serving_default_input_1` and `StatefulPartitionedCall` later to be use in the C API.
 
@@ -244,26 +244,38 @@ Note that you have `NoOpDeallocator` void function declared, we will use it late
 Next need to load the savedmodel and the session using `TF_LoadSessionFromSavedModel` API. 
 
 ```cpp
-
     //********* Read model
-    TF_Graph* Graph = TF_NewGraph();
-    TF_Status* Status = TF_NewStatus();
+	TF_Graph* graph = TF_NewGraph();
+	TF_Status* status = TF_NewStatus();
 
-    TF_SessionOptions* SessionOpts = TF_NewSessionOptions();
-    TF_Buffer* RunOpts = NULL;
+	TF_SessionOptions* session_opts = TF_NewSessionOptions();
+	TF_Buffer* run_opts = NULL;
 
-    const char* saved_model_dir = "model/"; // Path of the model
+    /*
+    The given SavedModel SignatureDef contains the following input(s):
+      inputs['input_1'] tensor_info:
+          dtype: DT_FLOAT
+          shape: (-1, 28, 28, 1)
+          name: serving_default_input_1:0
+    The given SavedModel SignatureDef contains the following output(s):
+      outputs['dense_2'] tensor_info:
+          dtype: DT_FLOAT
+          shape: (-1, 10)
+          name: StatefulPartitionedCall:0
+    Method name is: tensorflow/serving/predict
+    */
+    const char* saved_model_dir = "image_classification/";
     const char* tags = "serve"; // default model serving tag; can change in future
     int ntags = 1;
 
-    TF_Session* Session = TF_LoadSessionFromSavedModel(SessionOpts, RunOpts, saved_model_dir, &tags, ntags, Graph, NULL, Status);
-    if(TF_GetCode(Status) == TF_OK)
+    TF_Session* session = TF_LoadSessionFromSavedModel(session_opts, run_opts, saved_model_dir, &tags, ntags, graph, NULL, status);
+    if (TF_GetCode(status) == TF_OK)
     {
         printf("TF_LoadSessionFromSavedModel OK\n");
     }
     else
     {
-        printf("%s",TF_Message(Status));
+        printf("%s", TF_Message(status));
     }
 ```
 
@@ -271,28 +283,29 @@ Next we grab the tensor node from the graph by their name. Remember earlier we s
 
 ```cpp
     //****** Get input tensor
-    int NumInputs = 1;
-    TF_Output* Input = malloc(sizeof(TF_Output) * NumInputs);
+    int num_inputs = 1;
+    TF_Output* input = (TF_Output*)malloc(sizeof(TF_Output) * num_inputs);
 
-    TF_Output t0 = {TF_GraphOperationByName(Graph, "serving_default_input_1"), 0};
-    if(t0.oper == NULL)
+    TF_Output t0 = { TF_GraphOperationByName(graph, "serving_default_input_1"), 0 };
+    if (t0.oper == NULL)
         printf("ERROR: Failed TF_GraphOperationByName serving_default_input_1\n");
     else
-	    printf("TF_GraphOperationByName serving_default_input_1 is OK\n");
-    
-    Input[0] = t0;
-    
-    //********* Get Output tensor
-    int NumOutputs = 1;
-    TF_Output* Output = malloc(sizeof(TF_Output) * NumOutputs);
+        printf("TF_GraphOperationByName serving_default_input_1 is OK\n");
 
-    TF_Output t2 = {TF_GraphOperationByName(Graph, "StatefulPartitionedCall"), 0};
-    if(t2.oper == NULL)
+    input[0] = t0;
+
+
+     //********* Get output tensor
+    int num_outputs = 1;
+    TF_Output* output = (TF_Output*)malloc(sizeof(TF_Output) * num_outputs);
+
+    TF_Output t2 = { TF_GraphOperationByName(graph, "StatefulPartitionedCall"), 0 };
+    if (t2.oper == NULL)
         printf("ERROR: Failed TF_GraphOperationByName StatefulPartitionedCall\n");
-    else	
-	printf("TF_GraphOperationByName StatefulPartitionedCall is OK\n");
-    
-    Output[0] = t2;
+    else
+        printf("TF_GraphOperationByName StatefulPartitionedCall is OK\n");
+
+    output[0] = t2;
 ```
 
 Next we will need to allocate the new tensor locally using `TF_NewTensor`, set the input value  and later we will pass to session run. *NOTE that `ndata` is total byte size of your data, not lenght of the array*
@@ -301,54 +314,68 @@ Here we set the input tensor with value of 20. and we should see the output valu
 
 ```cpp
     //********* Allocate data for inputs & outputs
-    TF_Tensor** InputValues = (TF_Tensor**)malloc(sizeof(TF_Tensor*)*NumInputs);
-    TF_Tensor** OutputValues = malloc(sizeof(TF_Tensor*)*NumOutputs);
+    TF_Tensor** input_values = (TF_Tensor**)malloc(sizeof(TF_Tensor*) * num_inputs);
+    TF_Tensor** output_values = (TF_Tensor**)malloc(sizeof(TF_Tensor*) * num_outputs);
 
-    int ndims = 2;
-    int64_t dims[] = {1,1};
-    int64_t data[] = {20};
-    int ndata = sizeof(int64_t); // This is tricky, it number of bytes not number of element
+    int ndims = 4;
+    int64_t dims[] = { 1, 28, 28, 1 };
+    float data[1 * 28 * 28 * 1];//= {1,1,1,1,1,1,1,1,1,1};
+    for (int i = 0; i < (1 * 28 * 28 * 1); i++)
+    {
+        data[i] = 1.00;
+    }
+    int ndata = sizeof(float) * 1 * 28 * 28 * 1;// This is tricky, it number of bytes not number of element
 
-    TF_Tensor* int_tensor = TF_NewTensor(TF_INT64, dims, ndims, data, ndata, &NoOpDeallocator, 0);
+    TF_Tensor* int_tensor = TF_NewTensor(TF_FLOAT, dims, ndims, data, ndata, &NoOpDeallocator, 0);
     if (int_tensor != NULL)
     {
         printf("TF_NewTensor is OK\n");
     }
     else
-	printf("ERROR: Failed TF_NewTensor\n");
-    
-    InputValues[0] = int_tensor;
+        printf("ERROR: Failed TF_NewTensor\n");
+
+    input_values[0] = int_tensor;
 ```
 
 Next we can run the model by invoking `TF_SessionRun` API. Here's how:
 
 ```cpp    
-    // //Run the Session
-    TF_SessionRun(Session, NULL, Input, InputValues, NumInputs, Output, OutputValues, NumOutputs, NULL, 0,NULL , Status);
+    //Run the session
+    TF_SessionRun(session, NULL, input, input_values, num_inputs, output, output_values, num_outputs, NULL, 0, NULL, status);
 
-    if(TF_GetCode(Status) == TF_OK)
+    if (TF_GetCode(status) == TF_OK)
     {
         printf("Session is OK\n");
     }
     else
     {
-        printf("%s",TF_Message(Status));
+        printf("%s", TF_Message(status));
     }
 
-    // //Free memory
-    TF_DeleteGraph(Graph);
-    TF_DeleteSession(Session, Status);
-    TF_DeleteSessionOptions(SessionOpts);
-    TF_DeleteStatus(Status);
+    // void* buff = TF_TensorData(output_values[0]);
+    // float* offsets = (float*)buff;
+    // printf("Result Tensor :\n");
+    // for (int i = 0; i < 10; i++)
+    // {
+    //     printf("%f\n", offsets[i]);
+    // }
+    
+    //Free memory
+    TF_DeleteGraph(graph);
+    TF_DeleteSession(session, status);
+    TF_DeleteSessionOptions(session_opts);
+    TF_DeleteStatus(status);
 ```
 Lastly, we want get back the output value from the output tensor using `TF_TensorData` that extract data from the tensor object. Since we know the size of the output which is 1, i can directly print it. Else use `TF_GraphGetTensorNumDims` or other API that is available in `c_api.h` or `tf_tensor.h` 
 
 ```cpp
-
-    void* buff = TF_TensorData(OutputValues[0]);
-    float* offsets = buff;
+    void* buff = TF_TensorData(output_values[0]);
+    float* offsets = (float*)buff;
     printf("Result Tensor :\n");
-    printf("%f\n",offsets[0]);
+    for (int i = 0; i < 10; i++)
+    {
+        printf("%f\n", offsets[i]);
+    }
     return 0;
 ```
 
